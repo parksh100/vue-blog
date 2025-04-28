@@ -37,14 +37,62 @@
         </tr>
       </tbody>
     </table>
+
+    <!-- llm과 색상테마 선택 항목 추가하고 생성하기 버튼 클릭시 함께 n8n에 요청하기  -->
+    <div class="generator-panel">
+      <div class="form-group">
+        <label class="form-label">LLM 모델 선택</label>
+        <select v-model="selectedModel" class="select-input">
+          <option value="chatgpt">ChatGPT</option>
+          <option value="claude">Claude 3</option>
+          <option value="gemini">Gemini 1.5</option>
+          <option value="grok3">Grok 3</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">테마 색상 선택</label>
+        <div class="theme-options">
+          <button
+            v-for="theme in themes"
+            :key="theme.value"
+            type="button"
+            class="theme-button"
+            :style="{ backgroundColor: theme.color }"
+            :class="{ selected: selectedTheme === theme.value }"
+            @click="selectedTheme = theme.value"
+          >
+            {{ theme.name }}
+          </button>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <button
+          type="button"
+          class="generate-button"
+          :style="{ backgroundColor: selectedButtonColor }"
+          @click="sendRequest"
+        >
+          콘텐츠 생성
+        </button>
+      </div>
+    </div>
+
+    <div class="preview-area" v-html="fixedHtmlContent"></div>
+
+    <!-- 생성 중 표시 -->
     <div class="row text-center" v-if="isCreating">
       <p class="progress-bar">
-        <em>선택된 키워드 생성을 시작합니다<span class="dot-animate"></span></em>
+        <em
+          >선택된 키워드 생성을 시작합니다<span class="dot-animate"></span
+          ><span> ({{ elapsedTime }}초 경과)</span></em
+        >
       </p>
     </div>
 
     <!-- 받아온 HTML을 실제로 렌더링 -->
-    <div v-html="htmlContent" class="mt-5 bg-light p-5 rounded"></div>
+    <div v-html="fixedHtmlContent" class="mt-5 bg-light p-5 rounded"></div>
   </div>
 </template>
 
@@ -58,11 +106,49 @@ export default {
     return {
       blogs: [],
       isCreating: false,
+      rawHtmlContent: "",
       htmlContent: "",
+      selectedModel: "chatgpt",
+      selectedTheme: "theme-purple",
+      themes: [
+        { name: "보라색 (기본)", value: "theme-purple", color: "#9c27b0" },
+        { name: "파란색 (신뢰감)", value: "theme-blue", color: "#2196f3" },
+        { name: "초록색 (편안함)", value: "theme-green", color: "#4caf50" },
+        { name: "베이지색 (따뜻함)", value: "theme-beige", color: "#f5deb3" },
+        { name: "로즈색 (감성)", value: "theme-rose", color: "#f06292" },
+      ],
+      elapsedTime: 0, // ⬅️ 경과 시간 추가
+      timer: null, // ⬅️ 타이머 저장용
     };
   },
   created() {
     this.getBlogs();
+  },
+  computed: {
+    fixedHtmlContent() {
+      let html = this.rawHtmlContent;
+
+      // 1. 목차 구조 수정 (toc-list 감싸기)
+      html = html.replace(/<div class="toc-container">([\s\S]*?)<\/div>/, (match, innerContent) => {
+        return `<div class="toc-container"><div class="toc-list">${innerContent}</div></div>`;
+      });
+
+      // 2. 필요하면 다른 수정도 여기에 추가
+      // 예: h2에 id가 없으면 자동으로 생성하는 코드 등
+
+      return html;
+    },
+    selectedButtonColor() {
+      // 현재 선택된 테마에 따라 버튼 색상 매핑
+      const colorMap = {
+        "theme-purple": "#9c27b0",
+        "theme-blue": "#2196f3",
+        "theme-green": "#4caf50",
+        "theme-beige": "#f5deb3",
+        "theme-rose": "#f06292",
+      };
+      return colorMap[this.selectedTheme] || "#9c27b0"; // 기본값은 보라색
+    },
   },
   methods: {
     async getBlogs() {
@@ -77,19 +163,55 @@ export default {
     },
     async getAction(blog) {
       this.isCreating = true;
+      this.elapsedTime = 0;
+      this.startTimer();
+
       try {
-        const response = await axios.post("https://n8n.ai.kr/webhook-test/create-content", blog);
-        console.log("생성 요청 성공:", response.data);
-        alert("생성 요청을 성공적으로 보냈습니다!");
-        // 응답 콘솔에 출력
-        console.log("응답 콘솔:", response.data);
-        this.htmlContent = response.data[0].message.content;
-        this.isCreating = false;
+        const payload = { ...blog, model: this.selectedModel, theme: this.selectedTheme };
+
+        // 1. 작업 시작 요청 (빠르게 처리됨)
+        const jobResponse = await axios.post("/api/start-content-job", payload);
+        const jobId = jobResponse.data.jobId;
+
+        // 2. 작업 상태 주기적으로 확인
+        const checkStatus = async () => {
+          const statusResponse = await axios.get(`/api/job-status/${jobId}`);
+
+          if (statusResponse.data.status === "completed") {
+            // 완료된 경우 결과 가져오기
+            const resultResponse = await axios.get(`/api/job-result/${jobId}`);
+            this.rawHtmlContent = resultResponse.data.content;
+            this.isCreating = false;
+            this.stopTimer();
+          } else if (statusResponse.data.status === "failed") {
+            // 실패한 경우
+            console.error("생성 실패:", statusResponse.data.error);
+            alert("생성 요청이 실패했습니다.");
+            this.isCreating = false;
+            this.stopTimer();
+          } else {
+            // 아직 진행 중인 경우 3초 후 다시 확인
+            setTimeout(checkStatus, 3000);
+          }
+        };
+
+        // 첫 상태 확인 시작
+        setTimeout(checkStatus, 3000);
       } catch (error) {
-        console.error("생성 요청 실패:", error);
-        alert("생성 요청에 실패했습니다.");
+        console.error("요청 시작 실패:", error);
+        alert("생성 요청 시작에 실패했습니다.");
         this.isCreating = false;
+        this.stopTimer();
       }
+    },
+    startTimer() {
+      this.timer = setInterval(() => {
+        this.elapsedTime++;
+      }, 1000);
+    },
+    stopTimer() {
+      clearInterval(this.timer);
+      this.timer = null;
     },
   },
 };
@@ -99,6 +221,82 @@ export default {
 * {
   font-family: "Noto Sans KR", sans-serif;
 }
+.generator-panel {
+  margin: 30px auto;
+  padding: 20px;
+  max-width: 600px;
+  background: #f9f9f9;
+  border-radius: 12px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+}
+
+.form-group {
+  margin-bottom: 20px;
+}
+
+.form-label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 8px;
+  font-size: 1rem;
+  color: #333;
+}
+
+.select-input {
+  width: 100%;
+  padding: 10px;
+  font-size: 1rem;
+  border-radius: 8px;
+  border: 1px solid #ccc;
+  background: white;
+}
+
+.theme-options {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.theme-button {
+  border: none;
+  padding: 10px 14px;
+  border-radius: 8px;
+  color: white;
+  font-weight: 600;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s;
+  outline: none;
+}
+
+.theme-button.selected {
+  box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.2);
+  transform: translateY(-2px);
+}
+
+.theme-button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+}
+
+.generate-button {
+  width: 100%;
+  padding: 14px;
+  font-size: 1.1rem;
+  background-color: #9c27b0;
+  color: white;
+  border: none;
+  border-radius: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 0.3s;
+}
+
+.generate-button:hover {
+  background-color: #7b1fa2;
+}
+
 /* 진행 중 텍스트에 깜빡이는 애니메이션 추가 */
 .progress-bar {
   font-weight: bold;
